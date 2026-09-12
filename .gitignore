@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.private/
+reports/live-*.md
+reports/live-*.json
+event-log-test-*/
