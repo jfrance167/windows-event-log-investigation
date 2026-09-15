@@ -6,6 +6,16 @@ The project uses PowerShell and the Python standard library.
 
 Use it only on systems and event data you own or are authorized to investigate.
 
+## Security Notice
+
+This repository is an educational defensive-security lab, not a production
+SIEM or incident-response system. Run the collection and activity-generation
+scripts only on systems you own or are explicitly authorized to test. Review
+event exports before sharing because they can contain usernames, hostnames, IP
+addresses, commands, and other sensitive data. Published samples are synthetic.
+
+Do not deploy this project in production.
+
 ## Objective
 
 Practice the complete workflow a junior SOC analyst would follow:
