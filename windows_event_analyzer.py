@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Sequence
 
 
 MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024
