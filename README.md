@@ -143,9 +143,10 @@ Exit codes:
 
 Input is newline-delimited JSON. Each event requires `timestamp`, `event_id`,
 `provider`, `channel`, and a string-to-string `data` object. Timestamps must
-include a timezone. Input structure and per-line size are validated before
-analysis. The analyzer refuses to use the input evidence file as its output
-path.
+include a timezone. Input is limited to 100 MiB total, 2 MiB per line, and
+100,000 events. The analyzer refuses to use the input evidence file as its
+output path. Markdown report fields are escaped and common URL schemes defanged;
+JSON output preserves the original parsed values.
 
 ## Run the tests
 

@@ -4,8 +4,10 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 
@@ -124,6 +126,33 @@ class ParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "event_id"):
             analyzer.load_events(path)
 
+    def test_enforces_total_size_line_size_and_event_count_limits(self) -> None:
+        path = self.write_jsonl(
+            [
+                {
+                    "timestamp": "2026-01-01T12:00:00Z",
+                    "event_id": 1,
+                    "provider": "Provider",
+                    "channel": "System",
+                    "data": {},
+                }
+            ]
+        )
+        content_size = path.stat().st_size
+        with patch.object(analyzer, "MAX_INPUT_BYTES", content_size - 1):
+            with self.assertRaisesRegex(ValueError, "input exceeds"):
+                analyzer.load_events(path)
+        with patch.object(analyzer.Path, "stat", return_value=SimpleNamespace(st_size=0)):
+            with patch.object(analyzer, "MAX_INPUT_BYTES", content_size - 1):
+                with self.assertRaisesRegex(ValueError, "input exceeds"):
+                    analyzer.load_events(path)
+        with patch.object(analyzer, "MAX_EVENTS", 0):
+            with self.assertRaisesRegex(ValueError, "events"):
+                analyzer.load_events(path)
+        with patch.object(analyzer, "MAX_JSONL_LINE_BYTES", 8):
+            with self.assertRaisesRegex(ValueError, "exceeds"):
+                analyzer.load_events(path)
+
 
 class DetectionTests(unittest.TestCase):
     @classmethod
@@ -222,6 +251,61 @@ class DetectionTests(unittest.TestCase):
         rules = {alert.rule_id for alert in investigation.alerts}
         self.assertNotIn("AUTH-BRUTE-FORCE", rules)
 
+    def test_distinct_threshold_window_is_linear_and_keeps_first_matching_window(self) -> None:
+        events = [
+            make_event(4625, data={"TargetUserName": "same", "IpAddress": "192.0.2.5"})
+            for _ in range(10_000)
+        ]
+        events.extend(
+            make_event(
+                4625,
+                minute=minute,
+                data={"TargetUserName": user, "IpAddress": "192.0.2.5"},
+            )
+            for minute, user in ((1, "alice"), (2, "bob"))
+        )
+        window = analyzer.first_threshold_window(
+            events,
+            3,
+            timedelta(minutes=10),
+            distinct=lambda item: analyzer.login_key(item)[0],
+        )
+
+        self.assertIsNotNone(window)
+        self.assertEqual(len(window), 10_002)
+        self.assertEqual({analyzer.login_key(item)[0] for item in window}, {"same", "alice", "bob"})
+
+    def test_distinct_window_decrements_counts_when_old_events_expire(self) -> None:
+        events = [
+            make_event(4625, minute=0, data={"TargetUserName": "alice", "IpAddress": "192.0.2.5"}),
+            make_event(4625, minute=1, data={"TargetUserName": "alice", "IpAddress": "192.0.2.5"}),
+            make_event(4625, minute=11, data={"TargetUserName": "bob", "IpAddress": "192.0.2.5"}),
+            make_event(4625, minute=11, data={"TargetUserName": "carol", "IpAddress": "192.0.2.5"}),
+        ]
+
+        window = analyzer.first_threshold_window(
+            events,
+            3,
+            timedelta(minutes=10),
+            distinct=lambda item: analyzer.login_key(item)[0],
+        )
+
+        self.assertIsNotNone(window)
+        self.assertEqual(window, events[1:])
+
+    def test_distinct_threshold_includes_event_exactly_at_window_boundary(self) -> None:
+        events = [
+            make_event(4625, minute=0, data={"TargetUserName": "alice", "IpAddress": "192.0.2.5"}),
+            make_event(4625, minute=10, data={"TargetUserName": "bob", "IpAddress": "192.0.2.5"}),
+        ]
+        window = analyzer.first_threshold_window(
+            events,
+            2,
+            timedelta(minutes=10),
+            distinct=lambda item: analyzer.login_key(item)[0],
+        )
+        self.assertEqual(window, events)
+
     def test_authentication_grouping_is_case_insensitive(self) -> None:
         events = [
             make_event(
@@ -264,6 +348,26 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("## Alert timeline", report)
         self.assertIn("## Limitations", report)
         self.assertIn("AUTH-BRUTE-FORCE", report)
+
+    def test_markdown_escapes_untrusted_fields_but_json_preserves_them(self) -> None:
+        hostile = "<svg onload=x>\n|` https://evil.example/path"
+        event = make_event(
+            4625,
+            data={"TargetUserName": hostile, "IpAddress": "192.0.2.5"},
+        )
+        investigation = analyzer.analyze_events([event] * 5, source=hostile)
+
+        report = analyzer.markdown_report(investigation)
+
+        self.assertIn("&lt;svg onload=x&gt;", report)
+        self.assertIn("hxxps://evil", report)
+        self.assertNotIn("https://evil.example/path", report)
+        self.assertNotIn("<svg", report)
+        self.assertNotIn("\n|`", report)
+        encoded = json.dumps(investigation.to_dict())
+        self.assertIn("<svg onload=x>", encoded)
+        self.assertIn("https://evil.example/path", encoded)
+        self.assertIn("\\n|`", encoded)
 
     def test_redaction_removes_raw_account_and_source(self) -> None:
         report = analyzer.markdown_report(self.investigation, redact=True)
