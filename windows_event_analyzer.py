@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
+import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +18,9 @@ from typing import Callable, Sequence
 
 
 MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024
+MAX_INPUT_BYTES = 100 * 1024 * 1024
+MAX_EVENTS = 100_000
+_URL_SCHEME_RE = re.compile(r"(?i)\b(https?|ftps?|mailto):")
 DEFAULT_FAILURE_THRESHOLD = 5
 DEFAULT_WINDOW_MINUTES = 10
 DEFAULT_SUCCESS_WINDOW_MINUTES = 15
@@ -200,15 +206,25 @@ def parse_event(document: object, line_number: int) -> Event:
 
 def load_events(path: Path) -> list[Event]:
     events: list[Event] = []
+    total_bytes = 0
     try:
+        if path.stat().st_size > MAX_INPUT_BYTES:
+            raise ValueError(f"input exceeds {MAX_INPUT_BYTES} bytes")
         with path.open("rb") as stream:
-            for line_number, raw_line in enumerate(stream, start=1):
+            line_number = 0
+            while raw_line := stream.readline(MAX_JSONL_LINE_BYTES + 1):
+                line_number += 1
+                total_bytes += len(raw_line)
+                if total_bytes > MAX_INPUT_BYTES:
+                    raise ValueError(f"input exceeds {MAX_INPUT_BYTES} bytes")
                 if len(raw_line) > MAX_JSONL_LINE_BYTES:
                     raise ValueError(
                         f"line {line_number}: exceeds {MAX_JSONL_LINE_BYTES} bytes"
                     )
                 if not raw_line.strip():
                     continue
+                if len(events) >= MAX_EVENTS:
+                    raise ValueError(f"input exceeds {MAX_EVENTS} events")
                 try:
                     document = json.loads(raw_line.decode("utf-8-sig"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -255,13 +271,20 @@ def first_threshold_window(
     distinct: Callable[[Event], str] | None = None,
 ) -> list[Event] | None:
     left = 0
+    distinct_counts: Counter[str] = Counter()
     for right, event in enumerate(events):
+        if distinct is not None:
+            distinct_counts[distinct(event)] += 1
         while event.timestamp - events[left].timestamp > window:
+            if distinct is not None:
+                expired_key = distinct(events[left])
+                distinct_counts[expired_key] -= 1
+                if distinct_counts[expired_key] == 0:
+                    del distinct_counts[expired_key]
             left += 1
-        candidate = list(events[left : right + 1])
-        count = len({distinct(item) for item in candidate}) if distinct else len(candidate)
+        count = len(distinct_counts) if distinct is not None else right - left + 1
         if count >= threshold:
-            return candidate
+            return list(events[left : right + 1])
     return None
 
 
@@ -632,19 +655,19 @@ def markdown_report(investigation: Investigation, redact: bool = False) -> str:
     for number, alert in enumerate(investigation.alerts, start=1):
         entities = redact_entities(alert.entities) if redact else alert.entities
         entity_text = ", ".join(
-            f"{key}={markdown_inline_code(value)}"
+            f"{markdown_inline_code(key)}={markdown_inline_code(value)}"
             for key, value in sorted(entities.items())
         )
         lines.extend(
             [
-                f"### {number}. [{alert.severity.upper()}] {alert.title}",
+                f"### {number}. [{markdown_text(alert.severity.upper())}] {markdown_text(alert.title)}",
                 "",
-                f"- Rule: `{alert.rule_id}`",
+                f"- Rule: {markdown_inline_code(alert.rule_id)}",
                 f"- Time: {format_timestamp(alert.start_time)}",
                 f"- Related events: {alert.event_count}",
                 f"- Entities: {entity_text or 'none'}",
                 "",
-                alert.description,
+                markdown_text(alert.description),
                 "",
             ]
         )
@@ -670,8 +693,43 @@ def markdown_report(investigation: Investigation, redact: bool = False) -> str:
 
 
 def markdown_inline_code(value: str) -> str:
-    normalized = " ".join(value.splitlines()).replace("`", "'")
-    return f"`{normalized}`"
+    normalized = "".join(
+        " "
+        if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        else character
+        for character in value
+    ).replace("`", "'")
+    normalized = defang_url_schemes(normalized)
+    return f"`{html.escape(normalized, quote=True)}`"
+
+
+def markdown_text(value: object) -> str:
+    """Escape untrusted values used outside code spans in generated Markdown."""
+    normalized = "".join(
+        " "
+        if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        else character
+        for character in str(value)
+    )
+    normalized = defang_url_schemes(normalized)
+    escaped = html.escape(normalized, quote=True)
+    for character in "\\`*_{}[]()#+-.!|>":
+        escaped = escaped.replace(character, "\\" + character)
+    return escaped
+
+
+def defang_url_schemes(value: str) -> str:
+    """Break common clickable URL schemes in Markdown report text."""
+    replacements = {
+        "http": "hxxp",
+        "https": "hxxps",
+        "ftp": "fxp",
+        "ftps": "fxps",
+        "mailto": "mail[to]",
+    }
+    return _URL_SCHEME_RE.sub(
+        lambda match: replacements[match.group(1).lower()] + ":", value
+    )
 
 
 def write_output(content: str, output: Path | None) -> None:
