@@ -173,3 +173,7 @@ that limitation is reported rather than hidden. No raw host logs are committed.
 - Keyword detections can produce legitimate-administration false positives.
 - The tool does not enrich IPs, correlate other hosts, or perform containment.
 - This is an offline learning tool, not a replacement for a SIEM or EDR.
+
+## License
+
+Original contributions are licensed under [MIT](LICENSE). See [licensing scope](LICENSING.md) for third-party exclusions.
